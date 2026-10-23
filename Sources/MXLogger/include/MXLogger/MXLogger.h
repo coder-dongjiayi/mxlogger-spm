@@ -8,7 +8,6 @@
 
 
 #import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
 NS_ASSUME_NONNULL_BEGIN
 
 /// Swift 调用名通过 NS_SWIFT_NAME 单独指定(见各声明尾部)，Objective-C 接口名与行为均未改变:
@@ -40,12 +39,28 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
     MXStoragePolicyYYYYMM NS_SWIFT_NAME(monthly),
 } NS_SWIFT_NAME(MXLogger.StoragePolicy);
 
+/// 支持同一进程内多线程写入。调用任何 destroy 接口前，必须先停止并等待该 logger
+/// 的全部写入（包括通过 loggerToken 的写入）完成；写入与销毁不支持并发调用。
+/// Supports concurrent writes within one process. Before any destroy call, stop and
+/// wait for all writes to that logger, including token-based writes, to finish.
+/// Writing and destruction must not run concurrently.
+/// macOS 支持协作多进程访问同一日志目录；各进程需使用本版本及一致的加密参数。
+/// macOS supports cooperating processes sharing a log directory; all participants
+/// must use this protocol and matching encryption parameters.
 @interface MXLogger : NSObject
 
+/// 默认日志根目录，不包含 nameSpace；通过系统目录 API 获取，支持 App Sandbox。
+/// iOS: Library/com.mxlog.LoggerCache。
+/// macOS: Application Support/<bundle-id>/MXLogger；无 bundle-id 时使用进程名。
+/// Default log root, excluding the namespace, resolved through system directory APIs.
+/// iOS: Library/com.mxlog.LoggerCache. macOS: Application Support/<bundle-id>/MXLogger,
+/// falling back to the process name when no bundle identifier is available.
++(NSString *)defaultDiskCacheDirectory NS_SWIFT_NAME(defaultDiskCacheDirectory());
+
 /// 创建（或获取）logger 对象：同一 nameSpace 只会创建一个实例，使用默认目录
-/// Library/com.mxlog.LoggerCache，需调用 destroyWithNamespace 释放
+/// （见 defaultDiskCacheDirectory），需调用 destroyWithNamespace 释放
 /// Create (or fetch) a logger instance: only one instance is created per nameSpace, stored in
-/// the default directory Library/com.mxlog.LoggerCache; call destroyWithNamespace to release it
+/// the default directory (see defaultDiskCacheDirectory); call destroyWithNamespace to release it
 /// @param nameSpace 命名空间 / namespace
 +(instancetype)initializeWithNamespace:(nonnull NSString*)nameSpace NS_SWIFT_NAME(shared(namespace:));
 
@@ -66,8 +81,8 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
 /// 创建（或获取）logger 对象（完整参数版本）
 /// Create (or fetch) a logger instance (full-parameter version)
 /// @param nameSpace 命名空间 / namespace
-/// @param directory 磁盘缓存目录，为空时默认 Library/com.mxlog.LoggerCache
-///                  / disk-cache directory, defaults to Library/com.mxlog.LoggerCache when nil
+/// @param directory 磁盘缓存目录，为空时使用 defaultDiskCacheDirectory
+///                  / disk-cache directory, defaults to defaultDiskCacheDirectory when nil
 /// @param storagePolicy 文件存储策略 / file storage policy
 /// @param fileName 日志文件名，为空时默认 mxlog / log file name, defaults to "mxlog" when nil
 /// @param fileHeder 日志文件头信息 / file header
@@ -105,8 +120,8 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
 
 
 
-/// 默认路径初始化：日志存储在 Library/com.mxlog.LoggerCache 目录下
-/// Initialize with the default path: logs are stored under Library/com.mxlog.LoggerCache
+/// 默认路径初始化：日志存储在 defaultDiskCacheDirectory/nameSpace 目录下
+/// Initialize with the default path: logs are stored under defaultDiskCacheDirectory/nameSpace
 /// @param nameSpace 命名空间 / namespace
 /// @param fileHeder 日志文件头信息 / file header
 -(instancetype)initWithNamespace:(nonnull NSString*)nameSpace fileHeader:(nullable NSString*)fileHeder;
@@ -132,8 +147,8 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
 /// 完整初始化方法（其他初始化方法最终都会调用它）
 /// Designated initializer (all other initializers funnel into this one)
 /// @param nameSpace 命名空间 / namespace
-/// @param directory 磁盘缓存目录，为空时默认 Library/com.mxlog.LoggerCache
-///                  / disk-cache directory, defaults to Library/com.mxlog.LoggerCache when nil
+/// @param directory 磁盘缓存目录，为空时使用 defaultDiskCacheDirectory
+///                  / disk-cache directory, defaults to defaultDiskCacheDirectory when nil
 /// @param storagePolicy 文件存储策略，默认 MXStoragePolicyYYYYMMDD 按天存储 / storage policy, defaults to MXStoragePolicyYYYYMMDD (daily)
 /// @param fileName 文件名，默认 mxlog / file name, defaults to "mxlog"
 /// @param fileHeder 日志文件头信息，业务可以在初始化时写入一些业务相关的信息（如 app 版本、所属平台等），文件创建时这条数据会被写入
@@ -145,8 +160,11 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
 -(instancetype)initWithNamespace:(nonnull NSString*)nameSpace diskCacheDirectory:(nullable NSString*) directory storagePolicy:(MXStoragePolicyType)storagePolicy fileName:(nullable NSString*) fileName fileHeader:(nullable NSString*)fileHeder cryptKey:(nullable NSString*)cryptKey iv:(nullable NSString*)iv;
 
 
-/// 程序进入后台的时候是否清理过期文件，默认 YES
-/// Whether to remove expired log files when the app enters background, defaults to YES
+/// iOS 进入后台时是否自动清理过期/超限文件，默认 YES。
+/// 此属性在 macOS 上不生效；macOS 由调用方显式调用 removeExpireData 清理。
+/// Whether to clean up expired/over-limit files when an iOS app enters background,
+/// enabled by default. This property has no effect on macOS; callers must explicitly
+/// invoke removeExpireData there.
 @property(nonatomic,assign)BOOL shouldRemoveExpiredDataWhenEnterBackground;
 
 /// 是否开启控制台打印，默认不开启。开启控制台打印会影响写入效率；
@@ -245,26 +263,36 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
 
 /// 清理日志文件：先删除过期文件（最后修改时间超过 maxDiskAge），若总大小仍超过 maxDiskSize
 /// 则从最旧的文件开始继续删除；当前正在写入的文件不会被删除。
-/// 程序进入后台时默认会自动调用（见 shouldRemoveExpiredDataWhenEnterBackground）
+/// iOS 默认在进入后台时自动调用，见 shouldRemoveExpiredDataWhenEnterBackground。
+/// macOS 必须由调用方显式调用；设置 maxDiskAge/maxDiskSize 不会触发清理。
 /// Clean up log files: first delete expired files (last-modified time older than maxDiskAge),
 /// then, if the total size still exceeds maxDiskSize, keep deleting from the oldest file onward;
 /// the file currently being written is never deleted.
-/// Called automatically when the app enters background by default
-/// (see shouldRemoveExpiredDataWhenEnterBackground)
+/// iOS calls this on entering background by default (see shouldRemoveExpiredDataWhenEnterBackground).
+/// macOS requires an explicit call; setting maxDiskAge/maxDiskSize does not trigger cleanup.
+/// macOS 也会跳过其他进程仍持有的日志文件。
+/// macOS also skips log files still held by other cooperating processes.
 -(void)removeExpireData;
 
 /// 清理全部日志文件
 /// Remove all log files
+/// macOS 删除操作与其他进程协调；仍存活的 logger 在下次写入时重开文件。
+/// macOS coordinates deletion across processes; live loggers reopen on their next write.
 -(void)removeAllData;
 
 /// 删除除当前正在写入日志文件外的所有日志文件
 /// Remove all log files except the one currently being written
+/// macOS 也保留其他进程仍持有的日志文件。
+/// macOS also retains log files held by other cooperating processes.
 -(void)removeBeforeAllData;
 
 /// 输出日志
 /// Write a log entry
 /// @return 0 成功（-1 扩容失败 -2 解除映射失败 -3 映射失败，调用 errorDesc 方法查看错误信息）
 ///         0 success (-1 file expansion failed, -2 unmap failed, -3 mmap failed; call errorDesc for details)
+/// macOS: -3 也包含状态刷新失败；-4 为进程锁失败或超过 uint32 文件长度上限。
+/// macOS: -3 also covers state-refresh failure; -4 means a process-lock failure
+/// or a file length exceeding the uint32 limit.
 /// @param level 日志等级：0 debug 1 info 2 warn 3 error 4 fatal / log level: 0 debug, 1 info, 2 warn, 3 error, 4 fatal
 /// @param name 日志名称 / logger name
 /// @param msg 日志信息 / log message
