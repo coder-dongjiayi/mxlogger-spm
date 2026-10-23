@@ -1,0 +1,289 @@
+//
+//  mxlog.cpp
+//  MXLoggerCore
+//
+//  Created by 董家祎 on 2022/4/13.
+//
+
+#include "mxlogger.hpp"
+
+#include <mutex>
+#include <unordered_map>
+#include <cstring>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+#endif
+#include <stdlib.h>
+
+#include "sink/mmap_sink.hpp"
+#include "mxlogger_helper.hpp"
+#include "log_msg.hpp"
+#include "debug_log.hpp"
+#include "mxlogger_console.hpp"
+
+namespace mxlogger{
+
+std::unordered_map<std::string, mxlogger *> *global_instanceDic_ =  new std::unordered_map<std::string, mxlogger *>;
+
+/// 保护global_instanceDic_，logger_mutex是实例级的，护不住并发初始化/释放
+static std::mutex global_instance_mutex_;
+
+
+ std::string mxlogger::md5(const char* ns,const char* directory){
+     
+     std::string diskcache_path = get_diskcache_path_(ns,directory);
+     std::string logger_token =  mxlogger_helper::mx_md5(diskcache_path);
+
+     return logger_token;
+}
+
+
+
+std::string mxlogger::get_diskcache_path_(const char* ns,const char* directory){
+    if (directory == nullptr) {
+        return "";
+    }
+    if (ns == nullptr) {
+        ns = "default";
+    }
+    std::string  directory_s = std::string{directory};
+    
+    std::string ns_s = std::string{ns};
+    
+    std::string diskcache_path = directory_s + "/" + ns_s + "/";
+    return diskcache_path;
+}
+
+mxlogger *mxlogger::global_for_loggerToken(const char* logger_token){
+
+    if(logger_token == nullptr) return nullptr;
+
+    std::lock_guard<std::mutex> lock(global_instance_mutex_);
+    auto itr = global_instanceDic_ -> find(logger_token);
+    if (itr != global_instanceDic_ -> end()) {
+        mxlogger * logger = itr -> second;
+        return logger;
+    }
+    return nullptr;
+}
+
+mxlogger *mxlogger::initialize_namespace(const char* ns,
+                                         const char* directory,
+                                         const char* storage_policy,
+                                         const char* file_name,
+                                         const char* file_header,
+                                         const char* cryptKey,
+                                         const char* iv){
+
+    /// directory为空时get_diskcache_path_返回空串；std::string::data()永不为nullptr，
+    /// 必须用empty()判断，否则会构造出一个dir_path_为空、只能写进cwd的坏logger
+    /// get_diskcache_path_ returns "" when directory is null; std::string::data()
+    /// never returns nullptr, so empty() is the correct check — otherwise a broken
+    /// logger with an empty dir_path_ (writing into the cwd) would be constructed
+    std::string diskcache_path = get_diskcache_path_(ns,directory);
+    if (diskcache_path.empty()) {
+        return nullptr;
+    }
+    
+    std::string logger_token =  mxlogger_helper::mx_md5(diskcache_path);
+
+    /// find和insert必须在同一把锁内，防止并发初始化同一namespace时创建出两个实例
+    std::lock_guard<std::mutex> lock(global_instance_mutex_);
+    auto itr = global_instanceDic_ -> find(logger_token);
+    if (itr != global_instanceDic_ -> end()) {
+        mxlogger * logger = itr -> second;
+        return logger;
+    }
+
+    auto logger = new mxlogger(diskcache_path.c_str(),storage_policy,file_name,file_header,cryptKey,iv);
+    logger -> logger_token_ = logger_token;
+    (*global_instanceDic_)[logger_token] = logger;
+    MXLoggerInfo("mxlogger Initialization succeeded.  storage_policy:%s file_name:%s is_crypt:%s",storage_policy,file_name == nullptr ? "mxlog" : file_name,cryptKey!=nullptr ? "true" : "false");
+    
+    return logger;
+}
+
+void mxlogger::delete_namespace(const char* logger_token){
+    delete_namespace_(logger_token);
+}
+
+void mxlogger::delete_namespace(const char* ns,const char* directory){
+ 
+    std::string diskcache_path = get_diskcache_path_(ns,directory);
+   
+    if (strcmp(diskcache_path.c_str(), "") == 0) {
+        return;
+    }
+    std::string logger_token =  mxlogger_helper::mx_md5(diskcache_path);
+    delete_namespace_(logger_token.c_str());
+}
+
+//释放指定的logger对象
+void mxlogger::delete_namespace_(const char* logger_token){
+    std::lock_guard<std::mutex> lock(global_instance_mutex_);
+    auto itr = global_instanceDic_ -> find(logger_token);
+    if (itr != global_instanceDic_ -> end()) {
+        mxlogger * logger = itr -> second;
+        delete logger;
+        global_instanceDic_->erase(itr);
+    }
+}
+void mxlogger::destroy(){
+    std::lock_guard<std::mutex> lock(global_instance_mutex_);
+    for (auto &pair : *global_instanceDic_) {
+        mxlogger *logger = pair.second;
+        delete logger;
+        pair.second = nullptr;
+    }
+    global_instanceDic_->clear();
+    
+}
+
+
+
+mxlogger::mxlogger(const char *diskcache_path,const char* storage_policy,const char* file_name, const char* file_header,const char* cryptKey, const char* iv) : diskcache_path_(diskcache_path){
+    std::string filename_ = file_name == nullptr ? "mxlog" : file_name;
+    
+    mmap_sink_ = std::make_shared<sinks::mmap_sink>(diskcache_path,filename_, mxlogger_helper::policy_(storage_policy));
+   
+
+    
+    mmap_sink_ -> init_aescfb(cryptKey, iv);
+    
+    mmap_sink_ -> add_file_heder(file_header);
+    
+    enable_ = true;
+    enable_console_ = false;
+  
+    
+}
+
+    
+
+mxlogger::~mxlogger(){
+    MXLoggerInfo("mxlogger delloc logger_token:%s",logger_token_.c_str());
+}
+
+const char* mxlogger::diskcache_path() const{
+    return diskcache_path_.c_str();
+}
+
+const char*  mxlogger::logger_token() const{
+    return logger_token_.c_str();
+}
+const char* mxlogger:: error_desc() const{
+    return  mmap_sink_ ->error_record.c_str();
+}
+void mxlogger::set_enable(bool enable){
+    
+    enable_ = enable;
+}
+void mxlogger::set_enable_console(bool enable){
+    enable_console_ = enable;
+}
+
+
+// 设置日志文件最大字节数(byte)
+void mxlogger::set_file_max_size(const  long max_size){
+    mmap_sink_ -> set_max_disk_size(max_size);
+   
+    
+}
+
+// 设置日志文件最大存储时长(s)
+void mxlogger::set_file_max_age(const  long max_age){
+    mmap_sink_ -> set_max_disk_age(max_age);
+  
+}
+
+// 清理过期文件
+void mxlogger::remove_expire_data(){
+    std::lock_guard<std::mutex> lock(logger_mutex);
+    mmap_sink_ -> remove_expire_data();
+   
+}
+
+//删除所有日志文件
+void mxlogger::remove_all(){
+    std::lock_guard<std::mutex> lock(logger_mutex);
+    mmap_sink_ -> remove_all();
+}
+// 删除除当前写入文件之外的所有日志文件
+void mxlogger::remove_before_all(){
+    std::lock_guard<std::mutex> lock(logger_mutex);
+    mmap_sink_ -> remove_before_all();
+}
+
+// 缓存日志文件大小(byte)
+long  mxlogger::dir_size(){
+   
+    return mmap_sink_->dir_size();
+}
+
+
+void mxlogger::set_log_level(int level){
+    mmap_sink_ -> set_level(mxlogger_helper::level_(level));
+}
+
+bool mxlogger::is_enable() const{
+    return enable_;
+}
+
+bool mxlogger::is_enable_console() const{
+    return enable_console_;
+}
+
+int mxlogger::log_level() const{
+    return static_cast<int>(mmap_sink_ -> level());
+}
+
+long long mxlogger::file_max_size() const{
+    return mmap_sink_ -> max_disk_size();
+}
+
+long long mxlogger::file_max_age() const{
+    return mmap_sink_ -> max_disk_age();
+}
+
+void mxlogger::flush(){
+    std::lock_guard<std::mutex> lock(logger_mutex);
+    mmap_sink_ -> flush();
+}
+
+int mxlogger::log(int level,const char* name, const char* msg,const char* tag,bool is_main_thread){
+    if (enable_ == false) {
+        return 0;
+    }
+    
+    std::lock_guard<std::mutex> lock(logger_mutex);
+    
+    if (name == nullptr || strcmp(name, "") == 0) {
+        name = "mxlogger";
+    }
+   
+    level::level_enum lvl = mxlogger_helper::level_(level);
+
+    details::log_msg log_msg(lvl,name,tag,msg,is_main_thread);
+    
+    
+    int result =  mmap_sink_ -> log(log_msg);
+   
+    /// 发布构建下MXLOGGER_CONSOLE_ENABLED为0(Android除外，见mxlogger_console.hpp)，
+    /// 这里连判断带调用整段不编译，gen_console_str/cJSON_Print的开销和代码体积都不会进包
+    /// MXLOGGER_CONSOLE_ENABLED is 0 in release builds (except on Android, see
+    /// mxlogger_console.hpp): the check and the call are both stripped, so neither the cost
+    /// nor the code size of gen_console_str/cJSON_Print ships
+#if MXLOGGER_CONSOLE_ENABLED
+    if (enable_console_ == true) {
+        
+        mxlogger_console::print(log_msg);
+
+    }
+#endif
+    return  result;
+    
+   
+}
+
+}
