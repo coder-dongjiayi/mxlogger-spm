@@ -6,6 +6,7 @@
 //
 
 #include "mxlogger.hpp"
+#include "mxlogger_version.hpp"
 
 #include <mutex>
 #include <unordered_map>
@@ -28,6 +29,10 @@ std::unordered_map<std::string, mxlogger *> *global_instanceDic_ =  new std::uno
 
 /// 保护global_instanceDic_，logger_mutex是实例级的，护不住并发初始化/释放
 static std::mutex global_instance_mutex_;
+
+const char* mxlogger::version() noexcept {
+    return MXLOGGER_CORE_VERSION;
+}
 
 
  std::string mxlogger::md5(const char* ns,const char* directory){
@@ -121,6 +126,7 @@ void mxlogger::delete_namespace(const char* ns,const char* directory){
 
 //释放指定的logger对象
 void mxlogger::delete_namespace_(const char* logger_token){
+    if (logger_token == nullptr) return;
     std::lock_guard<std::mutex> lock(global_instance_mutex_);
     auto itr = global_instanceDic_ -> find(logger_token);
     if (itr != global_instanceDic_ -> end()) {

@@ -31,10 +31,14 @@ private:
     
     void handle_date_(policy::storage_policy policy);
     
-    int remove_all_(bool skip_current);
+    int remove_all_();
+    bool is_active_file_(const std::string &name);
 protected:
-#if MXLOGGER_MACOS_MULTIPROCESS
+#if MXLOGGER_MULTIPROCESS
     ipc::directory_lock process_lock_;
+#endif
+#ifdef _WIN32
+    ipc::active_file_lease active_lease_;
 #endif
    
     
@@ -48,7 +52,7 @@ protected:
     bool open();
     
     
-    int file_ident = -1;
+    files::native_file file_;
     
     // 获取文件大小
     size_t get_file_size();
@@ -83,8 +87,8 @@ public:
     // 删除过期文件
     void remove_expire_data();
     
-    // 删除所有日志文件
-    void remove_all();
+    // 删除未在使用的日志文件，保留当前文件和桌面端其他活跃 logger 的文件
+    virtual void remove_all();
     
     // 删除 除当前正在写入文件之前的所有文件
     void remove_before_all();

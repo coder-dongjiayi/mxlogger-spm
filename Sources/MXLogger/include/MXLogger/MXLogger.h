@@ -49,6 +49,10 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
 /// must use this protocol and matching encryption parameters.
 @interface MXLogger : NSObject
 
+/// 当前链接的 C++ Core 版本号，无需初始化 logger；与封装包版本号独立。
+/// The linked C++ Core version, available without initializing a logger.
++(NSString *)coreVersion NS_SWIFT_NAME(coreVersion());
+
 /// 默认日志根目录，不包含 nameSpace；通过系统目录 API 获取，支持 App Sandbox。
 /// iOS: Library/com.mxlog.LoggerCache。
 /// macOS: Application Support/<bundle-id>/MXLogger；无 bundle-id 时使用进程名。
@@ -274,10 +278,10 @@ typedef NS_ENUM(NSInteger, MXStoragePolicyType) {
 /// macOS also skips log files still held by other cooperating processes.
 -(void)removeExpireData;
 
-/// 清理全部日志文件
-/// Remove all log files
-/// macOS 删除操作与其他进程协调；仍存活的 logger 在下次写入时重开文件。
-/// macOS coordinates deletion across processes; live loggers reopen on their next write.
+/// 清理日志文件，保留当前正在使用的文件
+/// Remove inactive log files, preserving the current file.
+/// macOS 也保留其他活跃 logger 持有的文件。
+/// macOS also retains files held by other active loggers.
 -(void)removeAllData;
 
 /// 删除除当前正在写入日志文件外的所有日志文件

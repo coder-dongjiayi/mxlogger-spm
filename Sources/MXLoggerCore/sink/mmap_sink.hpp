@@ -14,6 +14,9 @@
 #include <unistd.h>
 #endif
 #include "base_file_sink.hpp"
+#ifdef _WIN32
+#include "../mxlogger_windows_write_time.hpp"
+#endif
 
 namespace mxlogger{
 namespace sinks {
@@ -45,16 +48,27 @@ private:
     // 映射内存首地址
     uint8_t* mmap_ptr_ = nullptr;
 
-#ifdef _WIN32
-    // Windows的文件映射对象(CreateFileMapping)，与映射视图配对管理
-    void* file_mapping_ = nullptr;
-#endif
+    files::mapped_view mapping_;
+
+    // Declared after the directory lock in each transaction. Windows either
+    // retains the view under its cache lease, or closes it before unlocking.
+    struct transaction_cleanup {
+        mmap_sink &sink;
+        ~transaction_cleanup();
+    };
 
     int write_data_(const void* buffer, size_t buffer_size, bool only_if_empty = false);
-#if MXLOGGER_MACOS_MULTIPROCESS
-    // Requires the directory's exclusive lock; refreshes cached length, capacity
-    // and file identity before touching the mapping.
+#if MXLOGGER_MULTIPROCESS
+    // Requires the directory's exclusive lock; refreshes committed length and
+    // capacity of the open file, without checking for path deletion/replacement.
     bool refresh_mmap_();
+#endif
+#ifdef _WIN32
+    files::windows_write_time write_time_;
+    bool flush_windows_write_time_();
+    // Runs with the cache mutex held, including from its eviction thread.
+    // Must not acquire the directory lock or mutate public logger state.
+    bool release_windows_mapping_();
 #endif
 
     /// 建立(或恢复)文件映射：fd丢失时重开文件，空文件先做页对齐扩容，
